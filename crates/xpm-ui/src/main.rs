@@ -42,31 +42,42 @@ enum UiMessage {
     // Progress popup messages
     ShowProgressPopup(String),
     OperationProgress(i32, String),
+    ProgressOutput(String),
+    ProgressPrompt(String),
+    ProgressHidePrompt,
     OperationDone(bool),
     ShowTerminalFallback(String),
 }
 
-/// Patterns that indicate pacman is asking for confirmation (auto-answer "y")
-const PACMAN_CONFIRM_PATTERNS: &[&str] = &[
-    "Proceed with installation?",
-"Proceed with download?",
-":: Proceed with installation?",
-":: Proceed with download?",
-"Do you want to remove these packages?",
-":: Do you want to remove these packages?",
-"[Y/n]",
-"[y/N]",
+/// Patterns that indicate routine pacman prompts (auto-answer "y")
+/// These are safe default-yes [Y/n] prompts that always occur during normal operations.
+const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
+    "Proceed with installation? [Y/n]",
+"Proceed with download? [Y/n]",
+":: Proceed with installation? [Y/n]",
+":: Proceed with download? [Y/n]",
+"Do you want to remove these packages? [y/N]",
+":: Do you want to remove these packages? [y/N]",
+];
+
+/// Patterns that indicate pacman is asking a question that requires user input.
+/// These are non-routine prompts where the user should decide.
+const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
+    ":: Replace",
+":: Import",
+"Enter a number",
+"Enter a selection",
+"Terminate batch job",
 ];
 
 /// Patterns that indicate a conflict or error requiring user intervention
 const CONFLICT_PATTERNS: &[&str] = &[
     "conflicting files",
 "are in conflict",
-":: Replace",
-"error:",
 "exists in filesystem",
 "breaks dependency",
 "could not satisfy dependencies",
+"failed to commit transaction",
 ];
 
 /// Check if the system is running XeroLinux
@@ -491,8 +502,13 @@ fn run_managed_operation(
                                               continue;
                                           }
 
-                                          // Accumulate output
-                                          output_buffer_r.lock().unwrap().push_str(&cleaned);
+                                          // Accumulate output (cap at 64KB to prevent memory issues with large updates)
+                                          {
+                                              let mut buf = output_buffer_r.lock().unwrap();
+                                              if buf.len() < 65536 {
+                                                  buf.push_str(&cleaned);
+                                              }
+                                          }
 
                                           let is_escalated = *escalated_r.lock().unwrap();
 
@@ -500,6 +516,9 @@ fn run_managed_operation(
                                               // Already escalated — forward to terminal
                                               let _ = tx_reader.send(UiMessage::TerminalOutput(cleaned));
                                           } else {
+                                              // Send live output to the progress popup
+                                              let _ = tx_reader.send(UiMessage::ProgressOutput(cleaned.clone()));
+
                                               // Check for conflicts/errors
                                               let lower = cleaned.to_lowercase();
                                               let has_conflict = CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()));
@@ -512,42 +531,67 @@ fn run_managed_operation(
                                                   continue;
                                               }
 
-                                              // Auto-confirm prompts
-                                              let has_prompt = PACMAN_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
-                                              if has_prompt {
+                                              // Check for routine auto-confirm prompts
+                                              let is_auto_confirm = PACMAN_AUTO_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
+                                              if is_auto_confirm {
                                                   let _ = in_tx_r.send("y".to_string());
+                                                  let _ = tx_reader.send(UiMessage::ProgressHidePrompt);
+                                              } else {
+                                                  // Check for prompts that need user input
+                                                  let needs_user_input = PACMAN_USER_PROMPT_PATTERNS.iter().any(|p| cleaned.contains(p))
+                                                  || (cleaned.contains("[y/N]") && !is_auto_confirm);
+                                                  if needs_user_input {
+                                                      // Extract the prompt text (last non-empty line)
+                                                      let prompt_text = cleaned.lines()
+                                                      .filter(|l| !l.trim().is_empty())
+                                                      .last()
+                                                      .unwrap_or(&cleaned)
+                                                      .trim()
+                                                      .to_string();
+                                                      let _ = tx_reader.send(UiMessage::ProgressPrompt(prompt_text));
+                                                  }
                                               }
 
                                               // Stage detection for progress
                                               for line in cleaned.lines() {
                                                   let lower_line = line.to_lowercase();
+                                                  let trimmed = line.trim().to_string();
                                                   let new_percent = if lower_line.contains("resolving dependencies") {
                                                       10
                                                   } else if lower_line.contains("looking for conflicting") {
                                                       15
                                                   } else if lower_line.contains("downloading") {
-                                                      // Try to parse (X/Y) for proportional progress
-                                                      parse_progress_fraction(line, 25, 55, total_packages)
+                                                      parse_progress_fraction(line, 20, 50, total_packages)
                                                       .unwrap_or(35)
                                                   } else if lower_line.contains("checking keyring") || lower_line.contains("checking integrity") {
-                                                      55
+                                                      52
                                                   } else if lower_line.contains("checking package integrity") {
-                                                      58
+                                                      55
                                                   } else if lower_line.contains("loading package files") {
-                                                      60
-                                                  } else if lower_line.contains("installing") || lower_line.contains("upgrading") || lower_line.contains("removing") {
-                                                      parse_progress_fraction(line, 60, 88, total_packages)
-                                                      .unwrap_or(75)
+                                                      58
+                                                  } else if lower_line.contains("installing") || lower_line.contains("upgrading") || lower_line.contains("removing") || lower_line.contains("reinstalling") {
+                                                      parse_progress_fraction(line, 60, 85, total_packages)
+                                                      .unwrap_or(72)
                                                   } else if lower_line.contains("running post-transaction hooks") {
+                                                      88
+                                                  } else if lower_line.contains("arming conditionpathexists") || lower_line.contains("updating linux module") || lower_line.contains("dkms") {
                                                       90
+                                                  } else if lower_line.contains("updating linux initcpios") || lower_line.contains("mkinitcpio") {
+                                                      92
+                                                  } else if lower_line.contains("updating grub") || lower_line.contains("grub-mkconfig") {
+                                                      95
+                                                  } else if lower_line.contains("updating the info") || lower_line.contains("updating the desktop") || lower_line.contains("updating mime") {
+                                                      97
                                                   } else {
                                                       current_percent
                                                   };
 
                                                   if new_percent > current_percent {
                                                       current_percent = new_percent;
-                                                      let stage = line.trim().to_string();
-                                                      let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, stage));
+                                                      let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
+                                                  } else if new_percent == current_percent && current_percent >= 88 && !trimmed.is_empty() {
+                                                      // During post-transaction hooks, keep updating the stage text
+                                                      let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, trimmed));
                                                   }
                                               }
                                           }
@@ -880,10 +924,34 @@ fn main() {
                         window.set_progress_popup_title(SharedString::from(&title));
                         window.set_progress_popup_percent(0);
                         window.set_progress_popup_stage(SharedString::from("Starting..."));
+                        window.set_progress_popup_output(SharedString::from(""));
+                        window.set_progress_popup_show_input(false);
+                        window.set_progress_popup_prompt(SharedString::from(""));
                         window.set_progress_popup_done(false);
                         window.set_progress_popup_success(false);
                         window.set_show_progress_popup(true);
                         window.set_show_terminal(false);
+                    }
+                    UiMessage::ProgressOutput(text) => {
+                        // Append to output, keeping last ~200 lines to prevent UI slowdown
+                        let mut current = window.get_progress_popup_output().to_string();
+                        current.push_str(&text);
+                        // Trim to last 200 lines
+                        let lines: Vec<&str> = current.lines().collect();
+                        if lines.len() > 200 {
+                            let trimmed: String = lines[lines.len() - 200..].join("\n");
+                            window.set_progress_popup_output(SharedString::from(&trimmed));
+                        } else {
+                            window.set_progress_popup_output(SharedString::from(&current));
+                        }
+                    }
+                    UiMessage::ProgressPrompt(prompt) => {
+                        window.set_progress_popup_prompt(SharedString::from(&prompt));
+                        window.set_progress_popup_show_input(true);
+                    }
+                    UiMessage::ProgressHidePrompt => {
+                        window.set_progress_popup_show_input(false);
+                        window.set_progress_popup_prompt(SharedString::from(""));
                     }
                     UiMessage::OperationProgress(percent, stage) => {
                         window.set_progress_popup_percent(percent);
@@ -893,6 +961,8 @@ fn main() {
                         window.set_progress_popup_percent(100);
                         window.set_progress_popup_done(true);
                         window.set_progress_popup_success(success);
+                        window.set_progress_popup_show_input(false);
+                        window.set_progress_popup_prompt(SharedString::from(""));
                         // Clear selection after successful operation
                         if success {
                             window.set_selected_count(0);
@@ -1212,6 +1282,20 @@ fn main() {
     window.on_close_progress_popup(move || {
         if let Some(window) = window_weak_cp.upgrade() {
             window.set_show_progress_popup(false);
+        }
+    });
+
+    // Send user input from progress popup to the PTY
+    let progress_input = terminal_input_sender.clone();
+    let window_weak_pp = window.as_weak();
+    window.on_progress_popup_send_input(move |text| {
+        let text_str = text.to_string();
+        if let Some(sender) = progress_input.lock().unwrap().as_ref() {
+            let _ = sender.send(text_str);
+        }
+        if let Some(window) = window_weak_pp.upgrade() {
+            window.set_progress_popup_show_input(false);
+            window.set_progress_popup_prompt(SharedString::from(""));
         }
     });
 
