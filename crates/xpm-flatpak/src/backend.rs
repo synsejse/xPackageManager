@@ -1,20 +1,19 @@
 //! Flatpak backend implementation.
 
-use crate::remote::RemoteManager;
 use async_trait::async_trait;
 use libflatpak::{gio, prelude::*, Installation, RefKind};
 use tracing::{info, warn};
 use xpm_core::{
     error::{Error, Result},
     operation::{Operation, OperationKind, OperationResult},
-    package::{Package, PackageBackend, PackageInfo, PackageStatus, SearchResult, UpdateInfo, Version},
+    package::{
+        Package, PackageBackend, PackageInfo, PackageStatus, SearchResult, UpdateInfo, Version,
+    },
     source::{PackageSource, ProgressCallback},
 };
 
 /// The Flatpak backend.
-pub struct FlatpakBackend {
-    _remote_manager: RemoteManager,
-}
+pub struct FlatpakBackend;
 
 // Flatpak/GLib types are not Send/Sync, so we handle them carefully.
 unsafe impl Send for FlatpakBackend {}
@@ -23,9 +22,7 @@ unsafe impl Sync for FlatpakBackend {}
 impl FlatpakBackend {
     /// Creates a new Flatpak backend.
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            _remote_manager: RemoteManager::new(),
-        })
+        Ok(Self)
     }
 
     /// Gets the user installation in a blocking context.
@@ -40,48 +37,133 @@ impl FlatpakBackend {
             .map_err(|e| Error::BackendUnavailable(format!("System installation: {}", e)))
     }
 
+    fn installations() -> Vec<Installation> {
+        [
+            Self::get_user_installation().ok(),
+            Self::get_system_installation().ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    fn remote_names(installation: &Installation) -> Vec<String> {
+        let remotes = match installation.list_remotes(gio::Cancellable::NONE) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        remotes
+            .iter()
+            .filter_map(|remote| remote.name().map(|name| name.to_string()))
+            .collect()
+    }
+
+    fn installed_app_names(installation: &Installation) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+
+        if let Ok(refs) = installation.list_installed_refs(gio::Cancellable::NONE) {
+            for iref in refs {
+                if iref.kind() == RefKind::App {
+                    if let Some(name) = iref.name() {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    fn installed_app_keys(
+        installation: &Installation,
+    ) -> std::collections::HashSet<(String, String, String)> {
+        let mut keys = std::collections::HashSet::new();
+
+        if let Ok(refs) = installation.list_installed_refs(gio::Cancellable::NONE) {
+            for iref in refs {
+                if iref.kind() != RefKind::App {
+                    continue;
+                }
+
+                let name = match iref.name() {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let arch = iref.arch().map(|s| s.to_string()).unwrap_or_default();
+                let branch = iref.branch().map(|s| s.to_string()).unwrap_or_default();
+                keys.insert((name, arch, branch));
+            }
+        }
+
+        keys
+    }
+
+    fn display_name(app_id: &str) -> String {
+        app_id.split('.').last().unwrap_or(app_id).to_string()
+    }
+
+    fn package_from_installed_ref(iref: &libflatpak::InstalledRef) -> Package {
+        let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
+        let version = iref
+            .appdata_version()
+            .or_else(|| iref.branch())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let description = iref
+            .appdata_name()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let origin = iref.origin().map(|s| s.to_string()).unwrap_or_default();
+
+        Package::new(
+            name,
+            Version::new(&version),
+            description,
+            PackageBackend::Flatpak,
+            PackageStatus::Installed,
+            origin,
+        )
+    }
+
+    fn update_info_from_installed_ref(iref: &libflatpak::InstalledRef) -> UpdateInfo {
+        let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
+        let current = iref
+            .appdata_version()
+            .or_else(|| iref.branch())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let origin = iref.origin().map(|s| s.to_string()).unwrap_or_default();
+
+        UpdateInfo {
+            name,
+            current_version: Version::new(&current),
+            new_version: Version::new(&current),
+            backend: PackageBackend::Flatpak,
+            repository: origin,
+            download_size: iref.installed_size() as u64,
+        }
+    }
+
     /// Lists all available Flatpak apps from configured remotes (e.g., Flathub).
     pub async fn list_available(&self) -> Result<Vec<Package>> {
         tokio::task::spawn_blocking(|| {
             let mut packages = Vec::new();
             let mut seen = std::collections::HashSet::new();
-
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             // Collect installed app names for status checking
             let mut installed_names = std::collections::HashSet::new();
             for installation in &installations {
-                if let Ok(refs) = installation.list_installed_refs(gio::Cancellable::NONE) {
-                    for iref in refs {
-                        if iref.kind() == RefKind::App {
-                            if let Some(name) = iref.name() {
-                                installed_names.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
+                installed_names.extend(Self::installed_app_names(installation));
             }
 
             for installation in &installations {
-                let remotes = match installation.list_remotes(gio::Cancellable::NONE) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                for remote in remotes {
-                    let remote_name = match remote.name() {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-
+                for remote_name in Self::remote_names(installation) {
                     // Get remote refs
-                    let refs = match installation.list_remote_refs_sync(&remote_name, gio::Cancellable::NONE) {
+                    let refs = match installation
+                        .list_remote_refs_sync(&remote_name, gio::Cancellable::NONE)
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             warn!("Failed to list refs from {}: {}", remote_name, e);
@@ -106,11 +188,14 @@ impl FlatpakBackend {
                         }
                         seen.insert(name.clone());
 
-                        let branch = rref.branch().map(|s| s.to_string()).unwrap_or_else(|| "stable".to_string());
+                        let branch = rref
+                            .branch()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "stable".to_string());
                         let is_installed = installed_names.contains(&name);
 
                         // Extract display name from app ID (e.g., org.gimp.GIMP -> GIMP)
-                        let display_name = name.split('.').last().unwrap_or(&name).to_string();
+                        let display_name = Self::display_name(&name);
 
                         let status = if is_installed {
                             PackageStatus::Installed
@@ -131,7 +216,11 @@ impl FlatpakBackend {
             }
 
             // Sort by display name (stored in description field)
-            packages.sort_by(|a, b| a.description.to_lowercase().cmp(&b.description.to_lowercase()));
+            packages.sort_by(|a, b| {
+                a.description
+                    .to_lowercase()
+                    .cmp(&b.description.to_lowercase())
+            });
 
             Ok(packages)
         })
@@ -151,11 +240,9 @@ impl PackageSource for FlatpakBackend {
     }
 
     async fn is_available(&self) -> bool {
-        tokio::task::spawn_blocking(|| {
-            Self::get_user_installation().is_ok() || Self::get_system_installation().is_ok()
-        })
-        .await
-        .unwrap_or(false)
+        tokio::task::spawn_blocking(|| !Self::installations().is_empty())
+            .await
+            .unwrap_or(false)
     }
 
     async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
@@ -166,26 +253,12 @@ impl PackageSource for FlatpakBackend {
             let query_lower = query.to_lowercase();
 
             // Try both user and system installations.
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             for installation in installations {
-                let remotes = match installation.list_remotes(gio::Cancellable::NONE) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+                let installed_keys = Self::installed_app_keys(&installation);
 
-                for remote in remotes {
-                    let remote_name = match remote.name() {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-
+                for remote_name in Self::remote_names(&installation) {
                     // Get remote refs.
                     let refs = match installation
                         .list_remote_refs_sync(&remote_name, gio::Cancellable::NONE)
@@ -213,9 +286,8 @@ impl PackageSource for FlatpakBackend {
                         let branch = rref.branch().map(|s| s.to_string()).unwrap_or_default();
 
                         // Check if installed.
-                        let installed = installation
-                            .installed_ref(RefKind::App, &name, Some(&arch), Some(&branch), gio::Cancellable::NONE)
-                            .is_ok();
+                        let installed =
+                            installed_keys.contains(&(name.clone(), arch.clone(), branch.clone()));
 
                         results.push(SearchResult {
                             name: name.clone(),
@@ -244,13 +316,7 @@ impl PackageSource for FlatpakBackend {
         tokio::task::spawn_blocking(|| {
             let mut packages = Vec::new();
 
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             for installation in installations {
                 let refs = match installation.list_installed_refs(gio::Cancellable::NONE) {
@@ -263,27 +329,7 @@ impl PackageSource for FlatpakBackend {
                     if iref.kind() != RefKind::App {
                         continue;
                     }
-
-                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
-                    let version = iref
-                        .appdata_version()
-                        .or_else(|| iref.branch())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let description = iref
-                        .appdata_name()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    let origin = iref.origin().map(|s| s.to_string()).unwrap_or_default();
-
-                    packages.push(Package::new(
-                        name,
-                        Version::new(&version),
-                        description,
-                        PackageBackend::Flatpak,
-                        PackageStatus::Installed,
-                        origin,
-                    ));
+                    packages.push(Self::package_from_installed_ref(&iref));
                 }
             }
 
@@ -297,17 +343,10 @@ impl PackageSource for FlatpakBackend {
         tokio::task::spawn_blocking(|| {
             let mut updates = Vec::new();
 
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             for installation in installations {
-                let refs = match installation
-                    .list_installed_refs_for_update(gio::Cancellable::NONE)
+                let refs = match installation.list_installed_refs_for_update(gio::Cancellable::NONE)
                 {
                     Ok(r) => r,
                     Err(_) => continue,
@@ -317,23 +356,7 @@ impl PackageSource for FlatpakBackend {
                     if iref.kind() != RefKind::App {
                         continue;
                     }
-
-                    let name = iref.name().map(|s| s.to_string()).unwrap_or_default();
-                    let current = iref
-                        .appdata_version()
-                        .or_else(|| iref.branch())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let origin = iref.origin().map(|s| s.to_string()).unwrap_or_default();
-
-                    updates.push(UpdateInfo {
-                        name,
-                        current_version: Version::new(&current),
-                        new_version: Version::new(&current), // Flatpak doesn't expose new version easily.
-                        backend: PackageBackend::Flatpak,
-                        repository: origin,
-                        download_size: iref.installed_size() as u64,
-                    });
+                    updates.push(Self::update_info_from_installed_ref(&iref));
                 }
             }
 
@@ -347,13 +370,7 @@ impl PackageSource for FlatpakBackend {
         let name = name.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             for installation in installations {
                 let refs = match installation.list_installed_refs(gio::Cancellable::NONE) {
@@ -364,25 +381,7 @@ impl PackageSource for FlatpakBackend {
                 for iref in refs {
                     let ref_name = iref.name().map(|s| s.to_string()).unwrap_or_default();
                     if ref_name == name {
-                        let version = iref
-                            .appdata_version()
-                            .or_else(|| iref.branch())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let description = iref
-                            .appdata_name()
-                            .map(|s| s.to_string())
-                            .unwrap_or_default();
-                        let origin = iref.origin().map(|s| s.to_string()).unwrap_or_default();
-
-                        let package = Package::new(
-                            ref_name,
-                            Version::new(&version),
-                            description,
-                            PackageBackend::Flatpak,
-                            PackageStatus::Installed,
-                            origin,
-                        );
+                        let package = Self::package_from_installed_ref(&iref);
 
                         return Ok(PackageInfo {
                             package,
@@ -413,7 +412,8 @@ impl PackageSource for FlatpakBackend {
     }
 
     async fn execute(&self, operation: Operation) -> Result<OperationResult> {
-        self.execute_with_progress(operation, Box::new(|_| {})).await
+        self.execute_with_progress(operation, Box::new(|_| {}))
+            .await
     }
 
     async fn execute_with_progress(
@@ -442,28 +442,16 @@ impl PackageSource for FlatpakBackend {
             }
             OperationKind::SyncDatabases => {
                 // Flatpak doesn't have separate db sync.
-                OperationResult::success(
-                    operation,
-                    Vec::new(),
-                    start.elapsed().as_millis() as u64,
-                )
+                OperationResult::success(operation, Vec::new(), start.elapsed().as_millis() as u64)
             }
             OperationKind::CleanCache => {
                 let freed = self.clean_cache(0).await?;
                 info!("Freed {} bytes from flatpak cache", freed);
-                OperationResult::success(
-                    operation,
-                    Vec::new(),
-                    start.elapsed().as_millis() as u64,
-                )
+                OperationResult::success(operation, Vec::new(), start.elapsed().as_millis() as u64)
             }
             OperationKind::RemoveOrphans => {
                 // Flatpak handles runtime cleanup automatically.
-                OperationResult::success(
-                    operation,
-                    Vec::new(),
-                    start.elapsed().as_millis() as u64,
-                )
+                OperationResult::success(operation, Vec::new(), start.elapsed().as_millis() as u64)
             }
         };
 
@@ -482,13 +470,7 @@ impl PackageSource for FlatpakBackend {
 
     async fn clean_cache(&self, _keep_versions: usize) -> Result<u64> {
         tokio::task::spawn_blocking(|| {
-            let installations: Vec<Installation> = [
-                Self::get_user_installation().ok(),
-                Self::get_system_installation().ok(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
+            let installations = Self::installations();
 
             for installation in installations {
                 if let Err(e) = installation.prune_local_repo(gio::Cancellable::NONE) {

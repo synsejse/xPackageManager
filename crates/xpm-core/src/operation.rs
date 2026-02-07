@@ -49,83 +49,45 @@ pub struct Operation {
     pub packages: Vec<String>,
     /// Which backend to use.
     pub backend: PackageBackend,
-    /// Operation options.
-    pub options: OperationOptions,
 }
 
 impl Operation {
-    /// Creates a new install operation.
-    pub fn install(packages: Vec<String>, backend: PackageBackend) -> Self {
+    fn new(kind: OperationKind, packages: Vec<String>, backend: PackageBackend) -> Self {
         Self {
-            kind: OperationKind::Install,
+            kind,
             packages,
             backend,
-            options: OperationOptions::default(),
         }
+    }
+
+    fn without_packages(kind: OperationKind, backend: PackageBackend) -> Self {
+        Self::new(kind, Vec::new(), backend)
+    }
+
+    /// Creates a new install operation.
+    pub fn install(packages: Vec<String>, backend: PackageBackend) -> Self {
+        Self::new(OperationKind::Install, packages, backend)
     }
 
     /// Creates a new remove operation.
     pub fn remove(packages: Vec<String>, backend: PackageBackend) -> Self {
-        Self {
-            kind: OperationKind::Remove,
-            packages,
-            backend,
-            options: OperationOptions::default(),
-        }
+        Self::new(OperationKind::Remove, packages, backend)
     }
 
     /// Creates a new update operation.
     pub fn update(packages: Vec<String>, backend: PackageBackend) -> Self {
-        Self {
-            kind: OperationKind::Update,
-            packages,
-            backend,
-            options: OperationOptions::default(),
-        }
+        Self::new(OperationKind::Update, packages, backend)
     }
 
     /// Creates a system upgrade operation.
     pub fn system_upgrade(backend: PackageBackend) -> Self {
-        Self {
-            kind: OperationKind::SystemUpgrade,
-            packages: Vec::new(),
-            backend,
-            options: OperationOptions::default(),
-        }
+        Self::without_packages(OperationKind::SystemUpgrade, backend)
     }
 
     /// Creates a database sync operation.
     pub fn sync_databases(backend: PackageBackend) -> Self {
-        Self {
-            kind: OperationKind::SyncDatabases,
-            packages: Vec::new(),
-            backend,
-            options: OperationOptions::default(),
-        }
+        Self::without_packages(OperationKind::SyncDatabases, backend)
     }
-
-    /// Sets the options for this operation.
-    pub fn with_options(mut self, options: OperationOptions) -> Self {
-        self.options = options;
-        self
-    }
-}
-
-/// Options that modify operation behavior.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OperationOptions {
-    /// Don't ask for confirmation.
-    pub no_confirm: bool,
-    /// Download only, don't install.
-    pub download_only: bool,
-    /// Force operation even if it would break dependencies.
-    pub force: bool,
-    /// Also remove unneeded dependencies (for Remove).
-    pub recursive: bool,
-    /// Keep configuration files (for Remove).
-    pub keep_config: bool,
-    /// Ignore dependency version requirements.
-    pub no_deps: bool,
 }
 
 /// Status of an ongoing or completed operation.

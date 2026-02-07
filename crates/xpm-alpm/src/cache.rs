@@ -21,15 +21,8 @@ impl CacheManager {
 
     /// Gets the total cache size in bytes.
     pub async fn get_size(&self) -> Result<u64> {
-        let mut total = 0u64;
-
-        for dir in &self.cache_dirs {
-            if dir.exists() {
-                total += Self::dir_size(dir)?;
-            }
-        }
-
-        Ok(total)
+        self.existing_dirs()
+            .try_fold(0u64, |total, dir| Ok(total + Self::dir_size(dir)?))
     }
 
     /// Calculates directory size recursively.
@@ -56,11 +49,7 @@ impl CacheManager {
     pub async fn clean(&self, keep_versions: usize) -> Result<u64> {
         let mut freed = 0u64;
 
-        for dir in &self.cache_dirs {
-            if !dir.exists() {
-                continue;
-            }
-
+        for dir in self.existing_dirs() {
             freed += self.clean_dir(dir, keep_versions)?;
         }
 
@@ -86,7 +75,10 @@ impl CacheManager {
 
             // Parse package name from filename (e.g., "package-1.2.3-1-x86_64.pkg.tar.zst").
             if let Some(pkg_name) = Self::parse_package_name(filename) {
-                let mtime = entry.metadata()?.modified().unwrap_or(std::time::UNIX_EPOCH);
+                let mtime = entry
+                    .metadata()?
+                    .modified()
+                    .unwrap_or(std::time::UNIX_EPOCH);
                 packages.entry(pkg_name).or_default().push((path, mtime));
             }
         }
@@ -161,11 +153,7 @@ impl CacheManager {
     pub async fn list(&self) -> Result<Vec<CachedPackage>> {
         let mut cached = Vec::new();
 
-        for dir in &self.cache_dirs {
-            if !dir.exists() {
-                continue;
-            }
-
+        for dir in self.existing_dirs() {
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let path = entry.path();
@@ -174,7 +162,11 @@ impl CacheManager {
                     continue;
                 }
 
-                let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let filename = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 if filename.contains(".pkg.tar") {
                     let metadata = entry.metadata()?;
@@ -188,6 +180,10 @@ impl CacheManager {
         }
 
         Ok(cached)
+    }
+
+    fn existing_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.cache_dirs.iter().filter(|dir| dir.exists())
     }
 }
 

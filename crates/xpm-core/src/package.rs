@@ -21,18 +21,7 @@ pub struct Version {
 impl Version {
     /// Creates a new Version from a version string.
     pub fn new(version_str: &str) -> Self {
-        let (epoch, rest) = if let Some(idx) = version_str.find(':') {
-            let epoch = version_str[..idx].parse().ok();
-            (epoch, &version_str[idx + 1..])
-        } else {
-            (None, version_str)
-        };
-
-        let (pkgver, pkgrel) = if let Some(idx) = rest.rfind('-') {
-            (rest[..idx].to_string(), rest[idx + 1..].to_string())
-        } else {
-            (rest.to_string(), String::new())
-        };
+        let (epoch, pkgver, pkgrel) = parse_version(version_str);
 
         Self {
             full: version_str.to_string(),
@@ -57,25 +46,9 @@ impl PartialOrd for Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Compare epochs first
-        match (self.epoch, other.epoch) {
-            (Some(a), Some(b)) => match a.cmp(&b) {
-                Ordering::Equal => {}
-                ord => return ord,
-            },
-            (Some(_), None) => return Ordering::Greater,
-            (None, Some(_)) => return Ordering::Less,
-            (None, None) => {}
-        }
-
-        // Then compare pkgver using version comparison
-        match vercmp(&self.pkgver, &other.pkgver) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // Finally compare pkgrel
-        vercmp(&self.pkgrel, &other.pkgrel)
+        compare_epoch(self.epoch, other.epoch)
+            .then_with(|| vercmp(&self.pkgver, &other.pkgver))
+            .then_with(|| vercmp(&self.pkgrel, &other.pkgrel))
     }
 }
 
@@ -85,13 +58,8 @@ fn vercmp(a: &str, b: &str) -> Ordering {
     let mut b_chars = b.chars().peekable();
 
     loop {
-        // Skip non-alphanumeric
-        while a_chars.peek().is_some_and(|c| !c.is_alphanumeric()) {
-            a_chars.next();
-        }
-        while b_chars.peek().is_some_and(|c| !c.is_alphanumeric()) {
-            b_chars.next();
-        }
+        skip_non_alnum(&mut a_chars);
+        skip_non_alnum(&mut b_chars);
 
         match (a_chars.peek().copied(), b_chars.peek().copied()) {
             (None, None) => return Ordering::Equal,
@@ -102,68 +70,92 @@ fn vercmp(a: &str, b: &str) -> Ordering {
                 let b_is_digit = bc.is_ascii_digit();
 
                 match (a_is_digit, b_is_digit) {
-                    (true, true) => {
-                        // Compare numeric segments
-                        let mut a_num = String::new();
-                        while let Some(&c) = a_chars.peek() {
-                            if c.is_ascii_digit() {
-                                a_num.push(c);
-                                a_chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        let mut b_num = String::new();
-                        while let Some(&c) = b_chars.peek() {
-                            if c.is_ascii_digit() {
-                                b_num.push(c);
-                                b_chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-
-                        // Compare as numbers (longer numeric string is greater, or lexicographic)
-                        match a_num.len().cmp(&b_num.len()) {
-                            Ordering::Equal => match a_num.cmp(&b_num) {
-                                Ordering::Equal => continue,
-                                ord => return ord,
-                            },
-                            ord => return ord,
-                        }
-                    }
-                    (false, false) => {
-                        // Compare alphabetic segments
-                        let mut a_alpha = String::new();
-                        while let Some(&c) = a_chars.peek() {
-                            if c.is_alphabetic() {
-                                a_alpha.push(c);
-                                a_chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        let mut b_alpha = String::new();
-                        while let Some(&c) = b_chars.peek() {
-                            if c.is_alphabetic() {
-                                b_alpha.push(c);
-                                b_chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-
-                        match a_alpha.cmp(&b_alpha) {
-                            Ordering::Equal => continue,
-                            ord => return ord,
-                        }
-                    }
-                    (true, false) => return Ordering::Greater, // Numbers > letters
+                    (true, true) => match compare_numeric_segment(&mut a_chars, &mut b_chars) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    },
+                    (false, false) => match compare_alpha_segment(&mut a_chars, &mut b_chars) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    },
+                    (true, false) => return Ordering::Greater,
                     (false, true) => return Ordering::Less,
                 }
             }
         }
     }
+}
+
+fn parse_version(version_str: &str) -> (Option<u32>, String, String) {
+    let (epoch, rest) = if let Some(idx) = version_str.find(':') {
+        let epoch = version_str[..idx].parse().ok();
+        (epoch, &version_str[idx + 1..])
+    } else {
+        (None, version_str)
+    };
+
+    let (pkgver, pkgrel) = if let Some(idx) = rest.rfind('-') {
+        (rest[..idx].to_string(), rest[idx + 1..].to_string())
+    } else {
+        (rest.to_string(), String::new())
+    };
+
+    (epoch, pkgver, pkgrel)
+}
+
+fn compare_epoch(left: Option<u32>, right: Option<u32>) -> Ordering {
+    match (left, right) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn skip_non_alnum<I: Iterator<Item = char>>(iter: &mut std::iter::Peekable<I>) {
+    while iter.peek().is_some_and(|c| !c.is_alphanumeric()) {
+        iter.next();
+    }
+}
+
+fn compare_numeric_segment<I: Iterator<Item = char>>(
+    left: &mut std::iter::Peekable<I>,
+    right: &mut std::iter::Peekable<I>,
+) -> Ordering {
+    let left_num = take_while(left, |c| c.is_ascii_digit());
+    let right_num = take_while(right, |c| c.is_ascii_digit());
+
+    match left_num.len().cmp(&right_num.len()) {
+        Ordering::Equal => left_num.cmp(&right_num),
+        ord => ord,
+    }
+}
+
+fn compare_alpha_segment<I: Iterator<Item = char>>(
+    left: &mut std::iter::Peekable<I>,
+    right: &mut std::iter::Peekable<I>,
+) -> Ordering {
+    let left_alpha = take_while(left, |c| c.is_alphabetic());
+    let right_alpha = take_while(right, |c| c.is_alphabetic());
+
+    left_alpha.cmp(&right_alpha)
+}
+
+fn take_while<I, F>(iter: &mut std::iter::Peekable<I>, predicate: F) -> String
+where
+    I: Iterator<Item = char>,
+    F: Fn(char) -> bool,
+{
+    let mut buf = String::new();
+    while let Some(&c) = iter.peek() {
+        if predicate(c) {
+            buf.push(c);
+            iter.next();
+        } else {
+            break;
+        }
+    }
+    buf
 }
 
 /// The source/backend a package comes from.
@@ -191,8 +183,6 @@ pub enum PackageStatus {
     Installed,
     /// Package is available but not installed.
     Available,
-    /// Package is installed but an update is available.
-    Upgradable,
     /// Package is orphaned (no longer needed by any other package).
     Orphan,
 }

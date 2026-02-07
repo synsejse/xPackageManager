@@ -5926,6 +5926,7 @@ dependencies = [
  "tokio",
  "tracing",
  "xpm-core",
+ "xpm-pacman",
 ]
 
 [[package]]
@@ -5949,6 +5950,10 @@ dependencies = [
  "tracing",
  "xpm-core",
 ]
+
+[[package]]
+name = "xpm-pacman"
+version = "0.1.0"
 
 [[package]]
 name = "xpm-service"
@@ -5979,6 +5984,7 @@ dependencies = [
  "xpm-alpm",
  "xpm-core",
  "xpm-flatpak",
+ "xpm-pacman",
  "xpm-service",
 ]
 

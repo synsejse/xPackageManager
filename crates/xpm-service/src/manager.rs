@@ -1,9 +1,8 @@
 //! Package manager orchestrator.
 
-use crate::progress::ProgressTracker;
 use crate::state::AppState;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info};
 use xpm_alpm::AlpmBackend;
 use xpm_core::{
@@ -27,19 +26,19 @@ pub enum ProgressMessage {
 
 /// The main package manager that orchestrates all backends.
 pub struct PackageManager {
-    alpm: Option<Arc<AlpmBackend>>,
-    flatpak: Option<Arc<FlatpakBackend>>,
+    backends: BackendSet,
     state: Arc<RwLock<AppState>>,
-    _progress_tracker: Arc<Mutex<ProgressTracker>>,
     progress_tx: broadcast::Sender<ProgressMessage>,
 }
 
-impl PackageManager {
-    /// Creates a new package manager.
-    pub fn new() -> Result<Self> {
-        let (progress_tx, _) = broadcast::channel(100);
+#[derive(Clone)]
+struct BackendSet {
+    alpm: Option<Arc<AlpmBackend>>,
+    flatpak: Option<Arc<FlatpakBackend>>,
+}
 
-        // Initialize backends.
+impl BackendSet {
+    fn new() -> Self {
         let alpm = match AlpmBackend::new() {
             Ok(backend) => {
                 info!("ALPM backend initialized");
@@ -62,11 +61,54 @@ impl PackageManager {
             }
         };
 
+        Self { alpm, flatpak }
+    }
+
+    fn refs(&self) -> Vec<(PackageBackend, &dyn PackageSource)> {
+        let mut backends = Vec::new();
+
+        if let Some(ref alpm) = self.alpm {
+            backends.push((PackageBackend::Pacman, alpm.as_ref() as &dyn PackageSource));
+        }
+
+        if let Some(ref flatpak) = self.flatpak {
+            backends.push((
+                PackageBackend::Flatpak,
+                flatpak.as_ref() as &dyn PackageSource,
+            ));
+        }
+
+        backends
+    }
+
+    fn get(&self, backend: PackageBackend) -> Result<&dyn PackageSource> {
+        match backend {
+            PackageBackend::Pacman => self
+                .alpm
+                .as_ref()
+                .map(|b| b.as_ref() as &dyn PackageSource)
+                .ok_or_else(|| Error::BackendUnavailable("Pacman".into())),
+            PackageBackend::Flatpak => self
+                .flatpak
+                .as_ref()
+                .map(|b| b.as_ref() as &dyn PackageSource)
+                .ok_or_else(|| Error::BackendUnavailable("Flatpak".into())),
+        }
+    }
+
+    fn alpm(&self) -> Option<&AlpmBackend> {
+        self.alpm.as_deref()
+    }
+}
+
+impl PackageManager {
+    /// Creates a new package manager.
+    pub fn new() -> Result<Self> {
+        let (progress_tx, _) = broadcast::channel(100);
+
         Ok(Self {
-            alpm,
-            flatpak,
+            backends: BackendSet::new(),
             state: Arc::new(RwLock::new(AppState::new())),
-            _progress_tracker: Arc::new(Mutex::new(ProgressTracker::new())),
             progress_tx,
         })
     }
@@ -83,33 +125,16 @@ impl PackageManager {
 
     /// Gets the backend for a specific package source.
     fn get_backend(&self, backend: PackageBackend) -> Result<&dyn PackageSource> {
-        match backend {
-            PackageBackend::Pacman => self
-                .alpm
-                .as_ref()
-                .map(|b| b.as_ref() as &dyn PackageSource)
-                .ok_or_else(|| Error::BackendUnavailable("Pacman".into())),
-            PackageBackend::Flatpak => self
-                .flatpak
-                .as_ref()
-                .map(|b| b.as_ref() as &dyn PackageSource)
-                .ok_or_else(|| Error::BackendUnavailable("Flatpak".into())),
-        }
+        self.backends.get(backend)
     }
 
     /// Checks which backends are available.
     pub async fn available_backends(&self) -> Vec<PackageBackend> {
         let mut backends = Vec::new();
 
-        if let Some(ref alpm) = self.alpm {
-            if alpm.is_available().await {
-                backends.push(PackageBackend::Pacman);
-            }
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            if flatpak.is_available().await {
-                backends.push(PackageBackend::Flatpak);
+        for (kind, backend) in self.backends.refs() {
+            if backend.is_available().await {
+                backends.push(kind);
             }
         }
 
@@ -120,17 +145,10 @@ impl PackageManager {
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
 
-        if let Some(ref alpm) = self.alpm {
-            match alpm.search(query).await {
+        for (kind, backend) in self.backends.refs() {
+            match backend.search(query).await {
                 Ok(r) => results.extend(r),
-                Err(e) => error!("Pacman search failed: {}", e),
-            }
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            match flatpak.search(query).await {
-                Ok(r) => results.extend(r),
-                Err(e) => error!("Flatpak search failed: {}", e),
+                Err(e) => error!("{} search failed: {}", kind, e),
             }
         }
 
@@ -153,17 +171,10 @@ impl PackageManager {
     pub async fn list_installed(&self) -> Result<Vec<Package>> {
         let mut packages = Vec::new();
 
-        if let Some(ref alpm) = self.alpm {
-            match alpm.list_installed().await {
+        for (kind, backend) in self.backends.refs() {
+            match backend.list_installed().await {
                 Ok(p) => packages.extend(p),
-                Err(e) => error!("Failed to list pacman packages: {}", e),
-            }
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            match flatpak.list_installed().await {
-                Ok(p) => packages.extend(p),
-                Err(e) => error!("Failed to list flatpak packages: {}", e),
+                Err(e) => error!("Failed to list {} packages: {}", kind, e),
             }
         }
 
@@ -180,17 +191,10 @@ impl PackageManager {
     pub async fn list_updates(&self) -> Result<Vec<UpdateInfo>> {
         let mut updates = Vec::new();
 
-        if let Some(ref alpm) = self.alpm {
-            match alpm.list_updates().await {
+        for (kind, backend) in self.backends.refs() {
+            match backend.list_updates().await {
                 Ok(u) => updates.extend(u),
-                Err(e) => error!("Failed to check pacman updates: {}", e),
-            }
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            match flatpak.list_updates().await {
-                Ok(u) => updates.extend(u),
-                Err(e) => error!("Failed to check flatpak updates: {}", e),
+                Err(e) => error!("Failed to check {} updates: {}", kind, e),
             }
         }
 
@@ -234,7 +238,7 @@ impl PackageManager {
 
     /// Syncs all databases.
     pub async fn sync_databases(&self) -> Result<()> {
-        if let Some(ref alpm) = self.alpm {
+        if let Some(alpm) = self.backends.alpm() {
             alpm.sync_databases().await?;
         }
         Ok(())
@@ -244,12 +248,8 @@ impl PackageManager {
     pub async fn get_cache_size(&self) -> Result<u64> {
         let mut total = 0u64;
 
-        if let Some(ref alpm) = self.alpm {
-            total += alpm.get_cache_size().await.unwrap_or(0);
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            total += flatpak.get_cache_size().await.unwrap_or(0);
+        for (_kind, backend) in self.backends.refs() {
+            total += backend.get_cache_size().await.unwrap_or(0);
         }
 
         Ok(total)
@@ -259,12 +259,8 @@ impl PackageManager {
     pub async fn clean_caches(&self, keep_versions: usize) -> Result<u64> {
         let mut freed = 0u64;
 
-        if let Some(ref alpm) = self.alpm {
-            freed += alpm.clean_cache(keep_versions).await.unwrap_or(0);
-        }
-
-        if let Some(ref flatpak) = self.flatpak {
-            freed += flatpak.clean_cache(keep_versions).await.unwrap_or(0);
+        for (_kind, backend) in self.backends.refs() {
+            freed += backend.clean_cache(keep_versions).await.unwrap_or(0);
         }
 
         Ok(freed)
@@ -274,7 +270,7 @@ impl PackageManager {
     pub async fn list_orphans(&self) -> Result<Vec<Package>> {
         let mut orphans = Vec::new();
 
-        if let Some(ref alpm) = self.alpm {
+        if let Some(alpm) = self.backends.alpm() {
             match alpm.list_orphans().await {
                 Ok(o) => orphans.extend(o),
                 Err(e) => error!("Failed to list orphans: {}", e),
@@ -288,7 +284,7 @@ impl PackageManager {
     pub async fn get_stats(&self) -> PackageStats {
         let mut stats = PackageStats::default();
 
-        if let Some(ref alpm) = self.alpm {
+        if let Some(alpm) = self.backends.alpm() {
             if let Ok(packages) = alpm.list_installed().await {
                 stats.pacman_installed = packages.len();
             }
@@ -300,7 +296,7 @@ impl PackageManager {
             }
         }
 
-        if let Some(ref flatpak) = self.flatpak {
+        if let Some(ref flatpak) = self.backends.flatpak {
             if let Ok(packages) = flatpak.list_installed().await {
                 stats.flatpak_installed = packages.len();
             }

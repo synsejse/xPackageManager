@@ -54,26 +54,3 @@ pub trait PackageSource: Send + Sync {
     /// Lists orphan packages (installed as deps but no longer needed).
     async fn list_orphans(&self) -> Result<Vec<Package>>;
 }
-
-/// Extension trait for common operations across sources.
-#[async_trait]
-pub trait PackageSourceExt: PackageSource {
-    /// Checks if a package is installed.
-    async fn is_installed(&self, name: &str) -> Result<bool> {
-        let installed = self.list_installed().await?;
-        Ok(installed.iter().any(|p| p.name == name))
-    }
-
-    /// Counts installed packages.
-    async fn installed_count(&self) -> Result<usize> {
-        Ok(self.list_installed().await?.len())
-    }
-
-    /// Counts available updates.
-    async fn update_count(&self) -> Result<usize> {
-        Ok(self.list_updates().await?.len())
-    }
-}
-
-// Blanket implementation for all PackageSources.
-impl<T: PackageSource> PackageSourceExt for T {}

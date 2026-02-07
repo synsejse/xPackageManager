@@ -14,6 +14,7 @@ path = "src/main.rs"
 xpm-core.workspace = true
 xpm-service.workspace = true
 xpm-alpm.workspace = true
+xpm-pacman.workspace = true
 xpm-flatpak.workspace = true
 slint.workspace = true
 tokio.workspace = true

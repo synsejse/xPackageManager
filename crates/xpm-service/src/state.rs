@@ -1,5 +1,24 @@
-//! Application state management.
 
+fn matches(&self, package: &Package) -> bool {
+    if !self.search_text.is_empty() {
+        let search = self.search_text.to_lowercase();
+        if !package.name.to_lowercase().contains(&search)
+            && !package.description.to_lowercase().contains(&search)
+        {
+            return false;
+        }
+    }
+
+    if let Some(backend) = self.backend {
+        if package.backend != backend {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Application state management.
 use xpm_core::{
     operation::OperationResult,
     package::{Package, PackageBackend, SearchResult, UpdateInfo},
@@ -82,8 +101,8 @@ impl AppState {
     }
 
     /// Sets the search filter.
-    pub fn set_search(&mut self, text: String) {
-        self.filter.search_text = text;
+    pub fn set_search(&mut self, text: impl Into<String>) {
+        self.filter.search_text = text.into();
     }
 
     /// Clears any error message.
@@ -100,26 +119,7 @@ impl AppState {
     pub fn filtered_installed(&self) -> Vec<&Package> {
         self.installed_packages
             .iter()
-            .filter(|p| {
-                // Text filter.
-                if !self.filter.search_text.is_empty() {
-                    let search = self.filter.search_text.to_lowercase();
-                    if !p.name.to_lowercase().contains(&search)
-                        && !p.description.to_lowercase().contains(&search)
-                    {
-                        return false;
-                    }
-                }
-
-                // Backend filter.
-                if let Some(backend) = self.filter.backend {
-                    if p.backend != backend {
-                        return false;
-                    }
-                }
-
-                true
-            })
+            .filter(|p| self.filter.matches(p))
             .collect()
     }
 
