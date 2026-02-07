@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::UiMessage;
+use super::types::UiMessage;
 
 use super::data::{load_packages_async, load_repo_packages, search_packages_async};
 

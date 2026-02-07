@@ -8,7 +8,8 @@ use xpm_core::package::{PackageBackend, PackageStatus, UpdateInfo, Version};
 use xpm_core::source::PackageSource;
 use xpm_flatpak::FlatpakBackend;
 
-use crate::{PackageData, StatsData, UiMessage};
+use super::types::UiMessage;
+use crate::{PackageData, StatsData};
 
 use super::backends::{init_backends, UiBackends};
 use super::utils::format_size;
@@ -1158,7 +1159,7 @@ fn build_desktop_name_map() -> HashMap<String, String> {
 }
 
 /// Humanize a package name - lookup desktop file names, fallback to title-case
-fn humanize_package_name(name: &str, desktop_map: &HashMap<String, String>) -> String {
+pub fn humanize_package_name(name: &str, desktop_map: &HashMap<String, String>) -> String {
     // Check desktop file map first (by package name)
     if let Some(human_name) = desktop_map.get(&name.to_lowercase()) {
         return human_name.clone();

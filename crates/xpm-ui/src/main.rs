@@ -2,6 +2,7 @@
 
 use slint::{Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::rc::Rc;
@@ -14,10 +15,36 @@ slint::include_modules!();
 
 mod ui_helpers;
 use ui_helpers::{
-    apply_terminal_text, get_local_package_info, is_arch_package, is_xerolinux_distro,
-    load_category_packages, load_packages_async, load_repo_packages, parse_pacman_repos,
-    refresh_after_operation, run_async, search_packages_async, strip_ansi,
+    apply_terminal_text, format_size, get_local_package_info, humanize_package_name,
+    is_arch_package, is_xerolinux_distro, load_category_packages, load_packages_async,
+    load_repo_packages, parse_pacman_repos, refresh_after_operation, run_async,
+    search_packages_async, strip_ansi, UiMessage,
 };
+
+const CONFLICT_PATTERNS: &[&str] = &[
+    "conflicting packages",
+    "conflict",
+    "exists in filesystem",
+    "remove it?",
+    "delete it?",
+];
+
+const PACMAN_AUTO_CONFIRM_PATTERNS: &[&str] = &[
+    "proceed with installation?",
+    "remove these packages?",
+    "proceed with download?",
+];
+
+const PACMAN_USER_PROMPT_PATTERNS: &[&str] = &[
+    "::",
+    "provider",
+    "enter a selection",
+    "replace",
+];
+
+const TERMINAL_RESET: &str = "\x1b[0m";
+const TERMINAL_BOLD: &str = "\x1b[1m";
+
 /// Spawn a child process in a PTY, returning (master_fd, child_pid)
 fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
     use std::os::unix::io::FromRawFd;
