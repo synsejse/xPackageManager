@@ -109,7 +109,7 @@ impl AlpmBackend {
         let repos = Self::repo_configs();
         let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
         for repo in repos {
-            handle.register_syncdb(&repo.name, siglevel).ok();
+            handle.register_syncdb(repo.name.as_str(), siglevel).ok();
         }
     }
 
@@ -117,7 +117,7 @@ impl AlpmBackend {
         let repos = Self::repo_configs();
         let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
         for repo in repos {
-            if let Ok(db) = handle.register_syncdb_mut(&repo.name, siglevel) {
+            if let Ok(db) = handle.register_syncdb_mut(repo.name.as_str(), siglevel) {
                 for server in repo.servers {
                     db.add_server(server).ok();
                 }
