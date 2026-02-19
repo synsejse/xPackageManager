@@ -5926,7 +5926,6 @@ dependencies = [
  "tokio",
  "tracing",
  "xpm-core",
- "xpm-pacman",
 ]
 
 [[package]]
@@ -5952,10 +5951,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xpm-pacman"
-version = "0.1.0"
-
-[[package]]
 name = "xpm-service"
 version = "0.1.0"
 dependencies = [
@@ -5975,6 +5970,7 @@ dependencies = [
  "flate2",
  "libc",
  "open",
+ "serde",
  "serde_json",
  "slint",
  "slint-build",
@@ -5984,7 +5980,6 @@ dependencies = [
  "xpm-alpm",
  "xpm-core",
  "xpm-flatpak",
- "xpm-pacman",
  "xpm-service",
 ]
 
