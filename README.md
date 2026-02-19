@@ -2,7 +2,7 @@
 
 A modern package manager for Arch Linux supporting pacman (via libalpm) and Flatpak backends.
 
-<img width="1128" height="774" alt="image" src="https://github.com/user-attachments/assets/14417881-daf0-4861-9c20-034db667cea4" />
+<img width="1128" height="774" alt="image" src="https://github.com/fasciste/xPackageManager/blob/main/Screenshot_20260219_152848.png?raw=true" />
 
 ## Features
 
